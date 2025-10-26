@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>@{{ username }} Tweets</title>
+  <style>
+    body { background:#0a0a1a; color:white; font-family:Arial, sans-serif; text-align:center; }
+    .tweet { background:#1e1e30; margin:20px auto; padding:15px; border-radius:10px; width:60%; }
+    h1 { color:#4fc3f7; }
+    .qr { margin-top:20px; }
+    a { color:#4fc3f7; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <h1>@{{ username }} Tweets</h1>
+  <div class="qr">
+    <img src="{{ qr_code }}" alt="QR Code" width="200" height="200">
+  </div>
+  {% for t in tweets %}
+    <div class="tweet">
+      <h3>@{{ t.username }}</h3>
+      <p>{{ t.content }}</p>
+      <small>{{ t.created_at }}</small>
+    </div>
+  {% endfor %}
+  <a href="{{ url_for('home') }}">← Back to handles</a>
+</body>
+</html>

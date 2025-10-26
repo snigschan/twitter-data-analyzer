@@ -1,4 +1,5 @@
+selenium
 tweepy
-pandas
 sqlalchemy
+pygame
 python-dotenv

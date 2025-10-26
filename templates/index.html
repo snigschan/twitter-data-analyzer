@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Twitter Data Analyzer</title>
+  <style>
+    body { background:#0a0a1a; color:white; font-family:Arial, sans-serif; text-align:center; }
+    h1 { color:#4fc3f7; margin-top:50px; }
+    .handle { margin:20px; padding:15px; border-radius:10px; background:#1e1e30; display:inline-block; font-size:20px; }
+    a { color:#4fc3f7; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <h1>Select a Twitter Handle</h1>
+  {% for handle in handles %}
+    <div class="handle">
+      <a href="{{ url_for('show_tweets') }}?username={{ handle }}">@{{ handle }}</a>
+    </div>
+  {% endfor %}
+</body>
+</html>

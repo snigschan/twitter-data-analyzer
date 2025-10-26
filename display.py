@@ -1,220 +1,196 @@
-import argparse
-import time
-import qrcode
-import os
-import textwrap
-from PIL import Image
-from screeninfo import get_monitors
-from config import engine
-from sqlalchemy.orm import sessionmaker
-from models import Tweet, TwitterUser
+# display.py
 import pygame
+import qrcode
+import io
+import threading
+import time
+import sys
+from config import (
+    SessionLocal,
+    DISPLAY_FONT,
+    DISPLAY_TITLE_SIZE,
+    DISPLAY_BODY_SIZE,
+    DISPLAY_REFRESH_INTERVAL,
+)
+from models import Tweet
+from fetch_tweets import fetch_all_tweets
 
-# --------------------------------------------------
-# Database setup
-# --------------------------------------------------
-SessionLocal = sessionmaker(bind=engine)
-session = SessionLocal()
 
-# --------------------------------------------------
-# Tweet Display App
-# --------------------------------------------------
-class TweetDisplayApp:
-    def __init__(self, username, monitor=None):
-        self.username = username.strip("@")
-        self.monitor = monitor
-        self.screen = None
-        self.tweets = []
-        self.current_index = 0
-        self.last_refresh = 0
-        self.refresh_interval = 3600  # hourly refresh
-        self.bg_colors = [
-            ((58, 12, 163), (0, 212, 255)),  # purple-blue
-            ((255, 0, 150), (255, 150, 0)),  # pink-orange
-            ((0, 100, 255), (0, 255, 200)),  # blue-cyan
-            ((255, 128, 0), (255, 0, 128))   # orange-pink
-        ]
-        self._init_pygame()
-        self.refresh_now()
-
-    # --------------------------------------------------
-    # Initialize Pygame
-    # --------------------------------------------------
-    def _init_pygame(self):
-        os.environ['SDL_VIDEO_CENTERED'] = '1'
+class DisplayManager:
+    def __init__(self):
         pygame.init()
-        pygame.font.init()
 
-        if self.monitor:
-            self.width = self.monitor.width
-            self.height = self.monitor.height
+        # Detect available displays
+        display_count = pygame.display.get_num_displays()
+
+        if display_count > 1:
+           # 🖥️ Secondary monitor detected
+           print(f"Detected {display_count} displays. Using secondary monitor.")
+           display_index = 1  # 0 = primary, 1 = secondary
+           display_mode = pygame.display.list_modes(display=display_index)[0]
+           self.screen = pygame.display.set_mode(display_mode, pygame.FULLSCREEN, display=display_index)
         else:
-            info = pygame.display.Info()
-            self.width, self.height = info.current_w, info.current_h
+            # 🖥️ Only one display available
+          print("Only one display detected. Using primary monitor.")
+          self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 
-        self.screen = pygame.display.set_mode((self.width, self.height), pygame.FULLSCREEN)
-        pygame.display.set_caption(f"Tweet Display - @{self.username}")
-
-    # --------------------------------------------------
-    # Fetch tweets from DB
-    # --------------------------------------------------
-    def refresh_now(self):
-        """Fetch latest tweets from the database."""
+        pygame.display.set_caption("Twitter Data Analyzer")
+        self.font_title = pygame.font.SysFont(DISPLAY_FONT, DISPLAY_TITLE_SIZE)
+        self.font_body = pygame.font.SysFont(DISPLAY_FONT, DISPLAY_BODY_SIZE)
+        self.clock = pygame.time.Clock()
+        self.session = SessionLocal()
+        self.current_handle = None
+        self.index = 0
         self.last_refresh = time.time()
-        user = session.query(TwitterUser).filter_by(username=self.username).first()
 
-        if user:
-            self.tweets = session.query(Tweet).filter_by(user_id=user.id).all()
-            print(f"🔄 Refreshed tweets for @{self.username}: {len(self.tweets)} found.")
-        else:
-            self.tweets = []
-            print(f"⚠️ No user found for @{self.username} in database.")
+        # Background refresh thread
+        self.stop_refresh = False
+        self.refresh_thread = threading.Thread(target=self._refresh_scheduler, daemon=True)
+        self.refresh_thread.start()
 
-    # --------------------------------------------------
-    # Draw gradient background
-    # --------------------------------------------------
-    def draw_gradient(self, surface, color1, color2):
-        """Draw a vertical gradient on the given surface."""
-        for y in range(self.height):
-            r = int(color1[0] + (color2[0] - color1[0]) * (y / self.height))
-            g = int(color1[1] + (color2[1] - color1[1]) * (y / self.height))
-            b = int(color1[2] + (color2[2] - color1[2]) * (y / self.height))
-            pygame.draw.line(surface, (r, g, b), (0, y), (self.width, y))
+    def _refresh_scheduler(self):
+        """Hourly tweet refresh in background (D6)."""
+        while not self.stop_refresh:
+            now = time.time()
+            if now - self.last_refresh > DISPLAY_REFRESH_INTERVAL:
+                print("\n🔄 Hourly refresh started...")
+                try:
+                    fetch_all_tweets()
+                    print("✅ Hourly refresh done.")
+                except Exception as e:
+                    print(f"⚠️ Error during refresh: {e}")
+                self.last_refresh = now
+            time.sleep(60)  # Check every minute
 
-    # --------------------------------------------------
-    # Render wrapped tweet text
-    # --------------------------------------------------
-    def render_tweet(self, surface, tweet_text):
-        title_font = pygame.font.SysFont("arial", 60, bold=True)
-        body_font = pygame.font.SysFont("arial", 42)
+    def _draw_text_centered(self, text, y, font, color=(255, 255, 255)):
+        rendered = font.render(text, True, color)
+        rect = rendered.get_rect(center=(self.screen.get_width() // 2, y))
+        self.screen.blit(rendered, rect)
+        return rect
 
-        # Draw username
-        username_surface = title_font.render(f"@{self.username}", True, (255, 255, 255))
-        username_rect = username_surface.get_rect(center=(self.width // 2, 120))
-        surface.blit(username_surface, username_rect)
+    def _generate_qr_surface(self, url, size=200):
+     """Generate QR code surface for the given URL."""
+     qr_img = qrcode.make(url)
+     buf = io.BytesIO()
+     qr_img.save(buf, format="PNG")
+     buf.seek(0)
+     qr_surface = pygame.image.load(buf, "qr.png").convert()  # ✅ Convert to 24-bit surface
+     qr_surface = pygame.transform.smoothscale(qr_surface, (size, size))
+     return qr_surface
 
-        # Word-wrap tweet text
-        wrapped_lines = textwrap.wrap(tweet_text, width=45)
-        y_offset = self.height // 2 - (len(wrapped_lines) * 30) // 2
-        for line in wrapped_lines:
-            tweet_surface = body_font.render(line, True, (255, 255, 255))
-            tweet_rect = tweet_surface.get_rect(center=(self.width // 2, y_offset))
-            surface.blit(tweet_surface, tweet_rect)
-            y_offset += 55
 
-    # --------------------------------------------------
-    # Generate and draw QR Code
-    # --------------------------------------------------
-    def draw_qr(self, surface, tweet):
-        """Generate and display QR code for this tweet."""
-        tweet_url = f"https://twitter.com/{self.username}/status/{tweet.tweet_id}"
-        qr = qrcode.QRCode(box_size=6, border=1)
-        qr.add_data(tweet_url)
-        qr.make(fit=True)
-        qr_img = qr.make_image(fill_color="white", back_color="black")
-        qr_pil = qr_img.resize((160, 160)).convert("RGB")
-        qr_surface = pygame.image.fromstring(qr_pil.tobytes(), qr_pil.size, "RGB")
-        surface.blit(qr_surface, (self.width - 200, self.height - 200))
+    def show_menu(self):
+        """Main handle selection menu."""
+        handles = sorted({t.username for t in self.session.query(Tweet).all()})
+        if not handles:
+            self._show_message("No tweets found. Run fetch first!", (255, 0, 0))
+            time.sleep(3)
+            return
 
-    # --------------------------------------------------
-    # Smooth fade transition
-    # --------------------------------------------------
-    def fade_transition(self, current_surface, next_surface):
-        """Smoothly fade from current_surface to next_surface."""
-        fade_surface = pygame.Surface((self.width, self.height))
-        for alpha in range(0, 256, 15):
-            fade_surface.set_alpha(alpha)
-            self.screen.blit(current_surface, (0, 0))
-            fade_surface.blit(next_surface, (0, 0))
-            self.screen.blit(fade_surface, (0, 0))
+        selecting = True
+        while selecting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self._quit()
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self._quit()
+                    if pygame.K_1 <= event.key <= pygame.K_9:
+                        idx = event.key - pygame.K_1
+                        if idx < len(handles):
+                            self.current_handle = handles[idx]
+                            selecting = False
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    x, y = event.pos
+                    for i, (_, rect) in enumerate(menu_items):
+                        if rect.collidepoint(x, y):
+                            self.current_handle = handles[i]
+                            selecting = False
+
+            self.screen.fill((0, 0, 0))
+            self._draw_text_centered("Select Twitter Handle", 100, self.font_title)
+            menu_items = []
+            y = 200
+            for i, handle in enumerate(handles):
+                rect = self._draw_text_centered(f"{i+1}. @{handle}", y, self.font_body, (0, 200, 255))
+                menu_items.append((handle, rect))
+                y += 80
+            self._draw_text_centered("Press ESC to Exit", y + 50, self.font_body, (200, 200, 200))
             pygame.display.flip()
-            pygame.time.delay(30)
-        self.screen.blit(next_surface, (0, 0))
-        pygame.display.flip()
+            self.clock.tick(30)
 
-    # --------------------------------------------------
-    # Run Display Loop
-    # --------------------------------------------------
-    def run(self):
-        clock = pygame.time.Clock()
-        gradient_index = 0
+    def show_tweets(self):
+        """Show tweets for the selected handle, with QR code."""
+        tweets = self.session.query(Tweet).filter_by(username=self.current_handle).order_by(Tweet.created_at.desc()).all()
+        if not tweets:
+            self._show_message(f"No tweets found for @{self.current_handle}", (255, 0, 0))
+            time.sleep(2)
+            return
 
-        # Initial render
-        if not self.tweets:
-            tweet_text = "No tweets found yet."
-            tweet = None
-        else:
-            tweet = self.tweets[self.current_index % len(self.tweets)]
-            tweet_text = tweet.text
-
-        current_surface = pygame.Surface((self.width, self.height))
-        color1, color2 = self.bg_colors[gradient_index]
-        self.draw_gradient(current_surface, color1, color2)
-        self.render_tweet(current_surface, tweet_text)
-        if tweet:
-            self.draw_qr(current_surface, tweet)
-        self.screen.blit(current_surface, (0, 0))
-        pygame.display.flip()
+        # Create QR code for this handle
+        profile_url = f"https://twitter.com/{self.current_handle}"
+        qr_surface = self._generate_qr_surface(profile_url)
 
         while True:
             for event in pygame.event.get():
-                if event.type == pygame.KEYDOWN:
+                if event.type == pygame.QUIT:
+                    self._quit()
+                elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        pygame.quit()
+                        self._quit()
+                    elif event.key == pygame.K_b:
                         return
-                    elif event.key == pygame.K_r:
-                        print("🔁 Manual refresh triggered.")
-                        self.refresh_now()
+                    elif event.key == pygame.K_RIGHT:
+                        self.index = (self.index + 1) % len(tweets)
+                    elif event.key == pygame.K_LEFT:
+                        self.index = (self.index - 1) % len(tweets)
 
-            time.sleep(5)  # wait before showing next tweet
-            self.current_index = (self.current_index + 1) % max(1, len(self.tweets))
-            gradient_index = (gradient_index + 1) % len(self.bg_colors)
+            self.screen.fill((20, 20, 40))
+            t = tweets[self.index]
+            self._draw_text_centered(f"@{t.username}", 100, self.font_title, (0, 200, 255))
+            wrapped = self._wrap_text(t.content, self.font_body, self.screen.get_width() - 350)
+            y = 200
+            for line in wrapped:
+                self._draw_text_centered(line, y, self.font_body)
+                y += 60
 
-            if not self.tweets:
-                tweet_text = "No tweets found yet."
-                tweet = None
+            # Draw QR code in bottom-right
+            qr_rect = qr_surface.get_rect(bottomright=(self.screen.get_width() - 50, self.screen.get_height() - 50))
+            self.screen.blit(qr_surface, qr_rect)
+
+            self._draw_text_centered("[←] Prev  [→] Next  [B] Back  [ESC] Quit", self.screen.get_height() - 100, self.font_body, (200, 200, 200))
+            pygame.display.flip()
+            self.clock.tick(30)
+
+    def _wrap_text(self, text, font, max_width):
+        words = text.split(" ")
+        lines, current = [], ""
+        for w in words:
+            if font.size(current + w)[0] > max_width:
+                lines.append(current)
+                current = w + " "
             else:
-                tweet = self.tweets[self.current_index]
-                tweet_text = tweet.text
+                current += w + " "
+        lines.append(current)
+        return lines
 
-            # Render next surface
-            next_surface = pygame.Surface((self.width, self.height))
-            color1, color2 = self.bg_colors[gradient_index]
-            self.draw_gradient(next_surface, color1, color2)
-            self.render_tweet(next_surface, tweet_text)
-            if tweet:
-                self.draw_qr(next_surface, tweet)
+    def _show_message(self, message, color=(255, 255, 255)):
+        self.screen.fill((0, 0, 0))
+        self._draw_text_centered(message, self.screen.get_height() // 2, self.font_body, color)
+        pygame.display.flip()
 
-            # Transition smoothly
-            self.fade_transition(current_surface, next_surface)
-            current_surface = next_surface
+    def _quit(self):
+        self.stop_refresh = True
+        pygame.quit()
+        sys.exit()
 
-            # Hourly refresh
-            if time.time() - self.last_refresh > self.refresh_interval:
-                print("⏰ Hourly refresh triggered.")
-                self.refresh_now()
+    def run(self):
+        while True:
+            self.show_menu()
+            if self.current_handle:
+                self.show_tweets()
+                self.current_handle = None
 
-            clock.tick(30)
 
-# --------------------------------------------------
-# Monitor detection
-# --------------------------------------------------
-def detect_monitors():
-    monitors = get_monitors()
-    for i, m in enumerate(monitors):
-        print(f"Monitor {i}: {m}")
-    return monitors
-
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-u", "--username", required=True)
-    args = parser.parse_args()
-
-    monitors = detect_monitors()
-    chosen_monitor = monitors[1] if len(monitors) > 1 else monitors[0]
-
-    app = TweetDisplayApp(args.username, monitor=chosen_monitor)
-    app.run()
+    DisplayManager().run()
